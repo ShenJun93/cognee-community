@@ -14,8 +14,9 @@ This source candidate pins **Cognee 1.6.5** and Python **>=3.10,<3.14**. The fac
 cores lacking `DOCUMENT_SYNC_VERSION >= 2` or `PIPELINE_SCOPE_ATTR`, before creating a resource
 or making requests. The checked-in lockfile was generated on Ubuntu against Cognee 1.6.5;
 fresh locked installations and Jenkins/DLT regressions passed on Python 3.10, 3.11 and 3.13.
-Real Cognee memory acceptance is still under validation on the isolated CI branch. These
-dependency and connector results do not establish automatic deletion acceptance.
+The CI workflow also runs real Cognee memory acceptance on Python 3.11 with explicit fixture
+deletion authority. These checks do not establish a production automatic-deletion mechanism;
+that integration contract still needs a maintainer decision.
 
 ## What gets ingested
 

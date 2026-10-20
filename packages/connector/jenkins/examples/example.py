@@ -7,8 +7,8 @@ forget-on-delete, then ask why builds failed.
 ``cognee.remember``. The first run ingests each job and its most recent builds
 (with the tail of every failed build's console log); re-running ``remember``
 fetches builds that finished since. Omitted records are retained unless an
-independent authority confirms deletion. Cognee 1.6.5 is required; end-to-end
-acceptance is still pending in an approved isolated environment.
+independent authority confirms deletion. Cognee 1.6.5 is required. Ubuntu CI
+tests the memory path with fixture authority; this demo retains omissions.
 
 ────────────────────────────────────────────────────────────────────────────
 One-time setup
