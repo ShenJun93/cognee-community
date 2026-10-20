@@ -12,6 +12,7 @@ import shutil
 import socket
 import sqlite3
 import sys
+import traceback
 from contextlib import ExitStack
 from importlib.metadata import version
 from pathlib import Path
@@ -26,6 +27,8 @@ def sandbox_environment(root):
     env.update(
         {
             "DATA_ROOT_DIRECTORY": str(root / "data"),
+            "HOME": str(root / "home"),
+            "XDG_CACHE_HOME": str(root / "cache"),
             "SYSTEM_ROOT_DIRECTORY": str(root / "system"),
             "CACHE_ROOT_DIRECTORY": str(root / "cache"),
             "LOGS_ROOT_DIRECTORY": str(root / "logs"),
@@ -63,6 +66,7 @@ def sandbox_environment(root):
             "CACHE_BACKEND": "sqlite",
             "CACHE_DB_URL": "sqlite+aiosqlite:///" + str(root / "cache" / "cache.db"),
             "AUTO_FEEDBACK": "false",
+            "IMPROVE_AUTO_ENABLED": "false",
             "SHARED_LADYBUG_LOCK": "false",
             "LLM_PROVIDER": "openai",
             "LLM_MODEL": "openai/gpt-5-mini",
@@ -94,10 +98,28 @@ def install_backend_guards(root, patches):
     import dlt
     from cognee.infrastructure.databases.graph.ladybug.adapter import LadybugAdapter
     from cognee.infrastructure.databases.vector.lancedb.LanceDBAdapter import LanceDBAdapter
-    from cognee_db_workers._kuzu_helpers import bundled_extensions_present
+    from cognee_db_workers import _kuzu_helpers
 
-    if not bundled_extensions_present():
+    if not _kuzu_helpers.bundled_extensions_present():
         raise AssertionError("Offline acceptance requires Cognee's bundled JSON extension")
+
+    def offline_json_extension(execute):
+        try:
+            execute("LOAD EXTENSION JSON;")
+            return
+        except Exception as error:
+            if "not been installed" not in str(error):
+                raise
+        bundled = _kuzu_helpers.bundled_json_extension_path(execute)
+        if bundled is None:
+            raise AssertionError(
+                "No compatible bundled JSON extension; remote install is forbidden"
+            )
+        execute("LOAD EXTENSION '" + bundled.replace("'", "''") + "';")
+
+    patches.enter_context(
+        patch.object(_kuzu_helpers, "load_json_extension", offline_json_extension)
+    )
 
     sqlite_connect = sqlite3.connect
     graph_init = LadybugAdapter.__init__
@@ -176,7 +198,7 @@ class MemoryRuntime:
         assert len(matches) == 1, "Expected exactly one acceptance dataset"
         return UUID(str(matches[0]))
 
-    async def documents(self, name):
+    async def documents(self, name, scope=None):
         rows = await self.cognee.datasets.list_data(await self.dataset_id(name), self.user)
         result = {}
         for row in rows:
@@ -184,6 +206,8 @@ class MemoryRuntime:
             if isinstance(metadata, str):
                 metadata = json.loads(metadata)
             assert metadata.get("source") == "jenkins"
+            if scope is not None and metadata.get("table_name") != scope:
+                continue
             external_id = metadata["external_id"]
             assert external_id not in result, "Duplicate external ID in acceptance dataset"
             result[external_id] = str(row.id)
@@ -332,6 +356,7 @@ def main():
         "dlt_config",
         "dlt_project",
         "tmp",
+        "home",
     ):
         (root / name).mkdir()
     expected = sandbox_environment(root)
@@ -345,13 +370,13 @@ def main():
 
     def deny_network(sock, address):
         if sock.family in (socket.AF_INET, socket.AF_INET6):
-            network_attempts.append("connect")
+            network_attempts.append("".join(traceback.format_stack(limit=16)))
             raise AssertionError("Acceptance permits no network connections")
         return original_connect(sock, address)
 
     def deny_network_ex(sock, address):
         if sock.family in (socket.AF_INET, socket.AF_INET6):
-            network_attempts.append("connect_ex")
+            network_attempts.append("".join(traceback.format_stack(limit=16)))
             raise AssertionError("Acceptance permits no network connections")
         return original_connect_ex(sock, address)
 
@@ -364,7 +389,9 @@ def main():
         patches.enter_context(patch("dotenv.load_dotenv", return_value=False))
         patches.enter_context(patch("dotenv.dotenv_values", return_value={}))
         counters = asyncio.run(run_acceptance(root))
-    assert not network_attempts, "Even caught network attempts invalidate offline acceptance"
+    assert not network_attempts, "Caught network attempts invalidate acceptance:\n" + "\n".join(
+        network_attempts
+    )
     result = {
         "status": "passed",
         "checks": [
@@ -380,6 +407,7 @@ def main():
             "no_reingestion",
             "failure_memory_retention",
             "failure_cursor_rollback",
+            "overlapping_source_ids",
         ],
         "network_attempts": len(network_attempts),
         "prune_calls": counters["prune_calls"],

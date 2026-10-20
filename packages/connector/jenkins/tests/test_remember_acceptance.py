@@ -72,6 +72,7 @@ def test_two_pass_remember_in_disposable_process(request, tmp_path):
         "no_reingestion",
         "failure_memory_retention",
         "failure_cursor_rollback",
+        "overlapping_source_ids",
     ]
     assert proof["network_attempts"] == 0
     assert proof["prune_calls"] == 0
@@ -187,6 +188,7 @@ async def exercise_memory(runtime):
                 **source_kwargs,
             ),
             dataset_name=dataset,
+            self_improvement=False,
             primary_key="id",
             write_disposition="merge",
             max_rows_per_table=0,
@@ -299,3 +301,31 @@ async def exercise_memory(runtime):
     third = await runtime.documents("jenkins_b")
     assert set(third) == {"job:api", "build:api#2", "build:api#3"}
     assert set(third.values()).isdisjoint(second.values())
+
+    # Two installations can have identical Jenkins job/build names. Their
+    # resource scopes must still prevent document collisions and cross-delete.
+    collision_primary = FakeJenkins(
+        {"api": {"builds": [rotated, stable]}, "web": {"description": "Deletedmarker"}}
+    )
+    collision_secondary = FakeJenkins(
+        {"api": {"description": "Othermarker", "builds": [_build(1, cause="Othermarker")]}}
+    )
+    await remember("jenkins_collision", collision_primary, "collision_primary")
+    primary_ids = await runtime.documents("jenkins_collision", "collision_primary")
+    assert set(primary_ids) == {"job:api", "build:api#1", "build:api#2", "job:web"}
+    await remember("jenkins_collision", collision_secondary, "collision_secondary")
+    secondary_ids = await runtime.documents("jenkins_collision", "collision_secondary")
+    assert set(secondary_ids) == {"job:api", "build:api#1"}
+    assert set(primary_ids.values()).isdisjoint(secondary_ids.values())
+    assert await runtime.documents("jenkins_collision", "collision_primary") == primary_ids
+    del collision_primary.jobs["web"]
+    collision_primary.folders = {"": ["api"]}
+    collision_primary.jobs["api"]["builds"] = [stable, _build(3, cause="Newmarker")]
+    await remember("jenkins_collision", collision_primary, "collision_primary", deleted=True)
+    assert await runtime.documents("jenkins_collision", "collision_secondary") == secondary_ids
+    remaining = await runtime.documents("jenkins_collision", "collision_primary")
+    assert set(remaining) == {"job:api", "build:api#2", "build:api#3"}
+    for reader in (runtime.vector_texts, runtime.graph_names):
+        contents = "\n".join(await reader("jenkins_collision")).lower()
+        assert "othermarker" in contents and "newmarker" in contents
+        assert "rotatedmarker" not in contents and "deletedmarker" not in contents
