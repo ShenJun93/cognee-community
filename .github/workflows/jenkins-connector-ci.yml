@@ -33,6 +33,8 @@ jobs:
       UV_PYTHON_DOWNLOADS: never
       DO_NOT_TRACK: '1'
       LITELLM_LOCAL_MODEL_COST_MAP: 'true'
+      TELEMETRY_DISABLED: 'true'
+      RUNTIME__DLTHUB_TELEMETRY: 'false'
     steps:
       - uses: actions/checkout@v4
         with:

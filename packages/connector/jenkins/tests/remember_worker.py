@@ -59,6 +59,7 @@ def sandbox_environment(root):
             "COGNEE_SKIP_PREFLIGHT": "1",
             "TELEMETRY_DISABLED": "1",
             "DLTHUB_TELEMETRY": "false",
+            "RUNTIME__DLTHUB_TELEMETRY": "false",
             # LiteLLM otherwise fetches its public cost map during import,
             # before model stubs can be installed. Use its bundled copy.
             "LITELLM_LOCAL_MODEL_COST_MAP": "true",

@@ -144,32 +144,37 @@ docker run --rm -p 8080:8080 jenkins/jenkins:lts-jdk21
 uv run --with pytest pytest tests/
 ```
 
-The source tests use fake Jenkins and include a real DLT SQLite merge candidate, bounded
-10,000-build history, malformed/capped listing, masking, cancellation and retry regressions.
-They have **not run in this Windows environment**: enforced WDAC blocks the Cognee native
-stack (including NumPy, pendulum, aiohttp and multidict). Do not reroute around that policy.
-Only Ruff, AST parsing and diff checks are authorized here.
+The source tests use fake Jenkins and include real DLT SQLite merge and rollback regressions,
+bounded 10,000-build history, malformed/capped listing, masking, cancellation and retries.
+All 59 Jenkins/DLT cases passed on GitHub-hosted Ubuntu with Python 3.10, 3.11 and 3.13.
+They have **not run on the development Windows host**: enforced WDAC blocks its Cognee native
+stack. Do not reroute around that policy. Windows checks remain static only.
 
 `tests/test_remember_acceptance.py` contains real two-pass `remember()` assertions for documents,
-vector payloads, graph entities, two sources and alternating datasets. `tests/remember_worker.py`
+vector payloads, graph entities, real vector search, repeat-sync model-call counts, overlapping
+source IDs, alternating datasets and memory retention after failed extraction. `tests/remember_worker.py`
 implements the real store readers and launches no paid models. On an approved non-Windows runner,
 the pytest wrapper starts a fresh process with only explicit test settings and disposable paths.
 It rejects unexpected inherited environment settings, disables dotenv loading, verifies provider
 configuration and guards SQLite, graph, vector and DLT constructors against shared paths. It also
 rejects symlink escapes, blocks Python network connections, requires the bundled graph extension,
-and forbids global prune. Model stubs are installed before engine setup. The JSON result file is
-written only after all memory assertions succeed; no such result has been produced here.
+and forbids global prune and remote graph-extension installation. Public hash-verified tokenizer
+assets are provisioned in a credential-free process before the offline worker. Model stubs are
+installed before engine setup. The JSON result file is written only after every memory assertion
+succeeds and no caught or uncaught Python network attempt occurred.
 
 The memory test skips by default and remains disabled on the WDAC-blocked Windows host, even with
-the opt-in. The opt-in cannot bypass the isolation checks. After the owner approves a compliant
-runner and installation, run there (not on this host):
+the opt-in. The opt-in cannot bypass the isolation checks. Run on an approved non-Windows
+runner after installation:
 
 ```bash
 python -m pytest tests/ --run-jenkins-memory -q
 ```
 
 The DLT failure regression additionally reopens the same disposable SQLite pipeline after partial
-extraction fails and checks the persisted cursor, unchanged rows and successful retry. None of
-these tests have been executed under the current source-only authorization. Runtime validation
-must still confirm the harness, native backend paths and cleanup behavior. A skip is not memory
-evidence. The former add-only test and example no longer call global prune.
+extraction fails and checks the persisted cursor, unchanged rows and successful retry. This
+regression passed on all three Ubuntu Python versions. Follow the isolated
+[CI workflow](https://github.com/ShenJun93/cognee-community/actions/workflows/jenkins-connector-ci.yml)
+for the current memory acceptance result. A skip is not memory evidence, and passing fixture
+deletion does not establish a production authoritative deletion mechanism. No test or example
+calls global prune.
