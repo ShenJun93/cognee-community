@@ -8,6 +8,7 @@ process receives no user credentials, and model calls use deterministic stubs.
 import asyncio
 import json
 import os
+import shutil
 import socket
 import sqlite3
 import sys
@@ -48,6 +49,7 @@ def sandbox_environment(root):
             "TMPDIR": str(root / "tmp"),
             "TEMP": str(root / "tmp"),
             "TMP": str(root / "tmp"),
+            "TIKTOKEN_CACHE_DIR": str(root / "tokenizers"),
             "ENABLE_BACKEND_ACCESS_CONTROL": "true",
             "REQUIRE_AUTHENTICATION": "true",
             "COGNEE_SKIP_CONNECTION_TEST": "true",
@@ -206,6 +208,16 @@ class MemoryRuntime:
             for path in (self.root / "dlt").rglob("state.json")
         }
         assert states, "Must inspect actual persisted DLT source state"
+
+        def has_cursor(value):
+            if not isinstance(value, dict):
+                return False
+            jobs = value.get("jobs", {})
+            if isinstance(jobs, dict) and jobs.get("api", {}).get("last_build") == 2:
+                return True
+            return any(has_cursor(child) for child in value.values())
+
+        assert has_cursor(states), "Must inspect the existing Jenkins api cursor at build 2"
         return states
 
     async def search_marker(self, name, marker):
@@ -304,6 +316,9 @@ def main():
     if root.exists():
         raise SystemExit("Acceptance root must not already exist")
     root.mkdir()
+    assets = within(root.parent, root.parent / "tokenizer_assets")
+    assert assets.is_dir() and any(assets.iterdir()), "Provision tokenizer assets before the worker"
+    shutil.copytree(assets, root / "tokenizers")
     for name in (
         "data",
         "system",

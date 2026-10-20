@@ -8,6 +8,7 @@ No global prune is used. Importing this module does not import Cognee.
 import hashlib
 import importlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +27,26 @@ def test_two_pass_remember_in_disposable_process(request, tmp_path):
 
     worker = Path(__file__).with_name("remember_worker.py")
     root = tmp_path / "memory_runtime"
+    # Provision public tokenizer assets before the offline worker starts.
+    # tiktoken validates their published hashes; this process never imports
+    # Cognee or receives model/database credentials.
+    provision_env = {key: os.environ[key] for key in ("PATH", "LANG") if key in os.environ}
+    provision_env["TIKTOKEN_CACHE_DIR"] = str(tmp_path / "tokenizer_assets")
+    provision = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import tiktoken; tiktoken.get_encoding('cl100k_base'); "
+            "tiktoken.get_encoding('o200k_base')",
+        ],
+        env=provision_env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert provision.returncode == 0, provision.stdout + provision.stderr
     result = subprocess.run(
         [sys.executable, "-I", "-B", str(worker), str(root)],
         cwd=tmp_path,
@@ -243,6 +264,7 @@ async def exercise_memory(runtime):
     assert await snapshot() == before_failure
     assert runtime.source_states() == before_state
 
+    fake.calls.clear()
     fake.jobs["api"]["builds"] = [stable, _build(3, cause="Newmarker")]
     del fake.jobs["web"]
     fake.folders = {"": ["api"]}
