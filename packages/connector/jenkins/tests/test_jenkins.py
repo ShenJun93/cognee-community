@@ -784,9 +784,7 @@ def test_service_alias_and_stats_are_available_on_resource():
     fake = FakeJenkins({"api": {"builds": [_build(1)]}})
     # A previous real DLT test may leave its pipeline active. This source must
     # have its own scope rather than inherit that pipeline's Jenkins cursor.
-    resource = jenkins_source(
-        base_url=BASE_URL, service=fake, resource_name="service_alias_stats"
-    )
+    resource = jenkins_source(base_url=BASE_URL, service=fake, resource_name="service_alias_stats")
     rows = list(resource)
     assert len(rows) == 2
     assert resource.cognee_sync_stats["emitted"] == 2
