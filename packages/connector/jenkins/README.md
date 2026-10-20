@@ -12,10 +12,10 @@ Deletion requires independent authoritative evidence through `confirm_deleted`.
 
 This source candidate pins **Cognee 1.6.5** and Python **>=3.10,<3.14**. The factory refuses
 cores lacking `DOCUMENT_SYNC_VERSION >= 2` or `PIPELINE_SCOPE_ATTR`, before creating a resource
-or making requests. The released core exports these contracts; runtime acceptance and a fresh
-installation remain unverified. The checked-in lockfile still reflects the old dependency pin:
-metadata-only locking with source builds disabled failed on wheel-less `langdetect`. Do not use
-`uv sync --frozen` as evidence of compatibility until an approved runner regenerates the lock.
+or making requests. The checked-in lockfile was generated on Ubuntu against Cognee 1.6.5;
+fresh locked installations and Jenkins/DLT regressions passed on Python 3.10, 3.11 and 3.13.
+Real Cognee memory acceptance is still under validation on the isolated CI branch. These
+dependency and connector results do not establish automatic deletion acceptance.
 
 ## What gets ingested
 

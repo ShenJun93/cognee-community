@@ -54,6 +54,9 @@ def sandbox_environment(root):
             "COGNEE_SKIP_PREFLIGHT": "1",
             "TELEMETRY_DISABLED": "1",
             "DLTHUB_TELEMETRY": "false",
+            # LiteLLM otherwise fetches its public cost map during import,
+            # before model stubs can be installed. Use its bundled copy.
+            "LITELLM_LOCAL_MODEL_COST_MAP": "true",
             "COGNEE_TRACING_ENABLED": "false",
             "CACHE_BACKEND": "sqlite",
             "CACHE_DB_URL": "sqlite+aiosqlite:///" + str(root / "cache" / "cache.db"),
@@ -159,10 +162,11 @@ def verify_config(root):
 
 
 class MemoryRuntime:
-    def __init__(self, cognee, user, root):
+    def __init__(self, cognee, user, root, model_calls):
         self.cognee = cognee
         self.user = user
         self.root = root
+        self.model_calls = model_calls
 
     async def dataset_id(self, name):
         datasets = await self.cognee.datasets.list_datasets(self.user)
@@ -182,6 +186,50 @@ class MemoryRuntime:
             assert external_id not in result, "Duplicate external ID in acceptance dataset"
             result[external_id] = str(row.id)
         return result
+
+    async def document_contents(self, name):
+        from cognee.infrastructure.files.utils.get_data_file_path import get_data_file_path
+
+        rows = await self.cognee.datasets.list_data(await self.dataset_id(name), self.user)
+        contents = {}
+        for row in rows:
+            metadata = row.system_metadata
+            if isinstance(metadata, str):
+                metadata = json.loads(metadata)
+            path = within(self.root, get_data_file_path(row.raw_data_location))
+            contents[metadata["external_id"]] = path.read_text(encoding="utf-8")
+        return contents
+
+    def source_states(self):
+        states = {
+            str(path.relative_to(self.root)): json.loads(path.read_text()).get("sources", {})
+            for path in (self.root / "dlt").rglob("state.json")
+        }
+        assert states, "Must inspect actual persisted DLT source state"
+        return states
+
+    async def search_marker(self, name, marker):
+        from cognee.context_global_variables import set_database_global_context_variables
+        from cognee.infrastructure.databases.vector import get_vector_engine_async
+
+        async with set_database_global_context_variables(await self.dataset_id(name), self.user.id):
+            engine = await get_vector_engine_async()
+            within(self.root, engine.url)
+            connection = await engine.get_connection()
+            for collection in await connection.table_names():
+                table = await connection.open_table(collection)
+                for payload in (await table.to_arrow()).column("payload").to_pylist():
+                    text = payload.get("text", "")
+                    if marker in text:
+                        # A real nearest-vector query, using the exact stored
+                        # chunk as query so deterministic fixture embeddings
+                        # have a meaningful expected nearest neighbour.
+                        results = await engine.search(
+                            collection, query_text=text, limit=1, include_payload=True
+                        )
+                        assert results and marker in results[0].payload["text"]
+                        return
+            raise AssertionError("New build has no searchable text vector")
 
     async def vector_texts(self, name):
         from cognee.context_global_variables import set_database_global_context_variables
@@ -236,13 +284,13 @@ async def run_acceptance(root):
         raise AssertionError("Global prune is prohibited in connector acceptance")
 
     with ExitStack() as patches, pytest.MonkeyPatch.context() as monkeypatch:
-        _stub_paid_models(monkeypatch)
+        model_calls = _stub_paid_models(monkeypatch)
         install_backend_guards(root, patches)
         verify_config(root)
         patches.enter_context(patch.object(cognee.prune, "prune_data", forbidden_prune))
         patches.enter_context(patch.object(cognee.prune, "prune_system", forbidden_prune))
         await setup()
-        runtime = MemoryRuntime(cognee, await get_default_user(), root)
+        runtime = MemoryRuntime(cognee, await get_default_user(), root, model_calls)
         await exercise_memory(runtime)
     return counters
 
@@ -312,6 +360,11 @@ def main():
             "dataset_isolation",
             "retained_ids",
             "repeat_sync",
+            "document_content",
+            "searchability",
+            "no_reingestion",
+            "failure_memory_retention",
+            "failure_cursor_rollback",
         ],
         "network_attempts": len(network_attempts),
         "prune_calls": counters["prune_calls"],

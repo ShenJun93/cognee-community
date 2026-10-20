@@ -11,6 +11,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -45,9 +46,15 @@ def test_two_pass_remember_in_disposable_process(request, tmp_path):
         "dataset_isolation",
         "retained_ids",
         "repeat_sync",
+        "document_content",
+        "searchability",
+        "no_reingestion",
+        "failure_memory_retention",
+        "failure_cursor_rollback",
     ]
     assert proof["network_attempts"] == 0
     assert proof["prune_calls"] == 0
+    print("JENKINS_MEMORY_ACCEPTANCE=" + json.dumps(proof, sort_keys=True))
 
 
 def _stub_paid_models(monkeypatch):
@@ -55,7 +62,10 @@ def _stub_paid_models(monkeypatch):
     from cognee.infrastructure.llm.LLMGateway import LLMGateway
     from cognee.shared.data_models import Edge, KnowledgeGraph, Node, SummarizedContent
 
+    calls = {"llm": 0, "embedding": 0}
+
     async def structured(text_input, system_prompt, response_model, **kwargs):
+        calls["llm"] += 1
         if isinstance(response_model, type) and issubclass(response_model, KnowledgeGraph):
             # Marker entities come only from supplied document content.
             names = [
@@ -95,6 +105,7 @@ def _stub_paid_models(monkeypatch):
         raise AssertionError("Unstubbed model schema: acceptance must remain offline")
 
     async def embed(self, text):
+        calls["embedding"] += 1
         from cognee.infrastructure.databases.vector.embeddings.EmbeddingEngine import (
             EmbeddingResult,
         )
@@ -112,6 +123,7 @@ def _stub_paid_models(monkeypatch):
             "cognee.infrastructure.databases.vector.embeddings." + name
         )
         monkeypatch.setattr(getattr(module, name), "embed_text", embed)
+    return calls
 
 
 async def exercise_memory(runtime):
@@ -122,7 +134,7 @@ async def exercise_memory(runtime):
     not search results or mocked counts. Backend settings and network denial
     must be checked by the isolated fixture before yielding this runtime.
     """
-    from test_jenkins import BASE_URL, FakeJenkins, _build
+    from test_jenkins import BASE_URL, FakeJenkins, _build, _Resp
 
     from cognee_community_connector_jenkins import jenkins_source
 
@@ -137,7 +149,7 @@ async def exercise_memory(runtime):
     )
     other = FakeJenkins({"other": {"description": "Othermarker", "builds": []}})
 
-    async def remember(dataset, client, scope, deleted=False):
+    async def remember(dataset, client, scope, deleted=False, **source_kwargs):
         result = await cognee.remember(
             jenkins_source(
                 base_url=BASE_URL,
@@ -146,6 +158,7 @@ async def exercise_memory(runtime):
                 confirm_deleted=lambda name, number: (
                     deleted and (name == "web" or (name == "api" and number == 1))
                 ),
+                **source_kwargs,
             ),
             dataset_name=dataset,
             primary_key="id",
@@ -157,6 +170,16 @@ async def exercise_memory(runtime):
     await remember("jenkins_a", fake, "primary")
     first = await runtime.documents("jenkins_a")
     assert set(first) == {"job:api", "build:api#1", "build:api#2", "job:web"}
+    first_contents = await runtime.document_contents("jenkins_a")
+    assert "Rotatedmarker" in first_contents["build:api#1"]
+    assert "Stablemarker" in first_contents["build:api#2"]
+    assert "Deletedmarker" in first_contents["job:web"]
+    model_calls = dict(runtime.model_calls)
+    fake.calls.clear()
+    await remember("jenkins_a", fake, "primary")
+    assert runtime.model_calls == model_calls, "Unchanged sync must not re-ingest old content"
+    assert await runtime.documents("jenkins_a") == first
+    assert not fake.urls("/1/api/json") and not fake.urls("/2/api/json")
     for reader in (runtime.vector_texts, runtime.graph_names):
         contents = "\n".join(await reader("jenkins_a")).lower()
         assert "rotatedmarker" in contents and "deletedmarker" in contents
@@ -168,6 +191,58 @@ async def exercise_memory(runtime):
     assert set(isolated_b) == set(first)
     assert set(isolated_b.values()).isdisjoint(first.values())
 
+    async def snapshot():
+        return {
+            dataset: (
+                await runtime.documents(dataset),
+                await runtime.document_contents(dataset),
+                sorted(await runtime.vector_texts(dataset)),
+                sorted(await runtime.graph_names(dataset)),
+            )
+            for dataset in ("jenkins_a", "jenkins_b")
+        }
+
+    before_failure = await snapshot()
+    before_state = runtime.source_states()
+
+    class Broken(FakeJenkins):
+        mode = "access"
+
+        def get(self, url, **kwargs):
+            response = super().get(url, **kwargs)
+            if self.mode == "access" and url.endswith("/job/api/api/json"):
+                return _Resp(status=403)
+            if self.mode == "partial" and url == BASE_URL + "/api/json":
+                response._payload = {"jobs": None}
+            return response
+
+    broken = Broken(fake.jobs)
+    for mode in ("access", "partial"):
+        broken.mode = mode
+        with pytest.raises(Exception, match=r"Jenkins|discovery"):
+            await remember("jenkins_a", broken, "primary")
+        assert await snapshot() == before_failure
+        assert runtime.source_states() == before_state
+
+    fake.jobs["api"]["builds"] = [rotated, stable, _build(3, cause="Newmarker")]
+    fake.calls.clear()
+
+    def interrupt_after_fetch():
+        if fake.urls("/3/api/json"):
+            raise RuntimeError("fixture interrupted extraction")
+
+    with pytest.raises(Exception, match="fixture interrupted extraction"):
+        await remember("jenkins_a", fake, "primary", check_active=interrupt_after_fetch)
+    assert await snapshot() == before_failure
+    assert runtime.source_states() == before_state
+    with (
+        patch("dlt.current.resource_state", side_effect=RuntimeError("fixture DLT state failure")),
+        pytest.raises(Exception, match="fixture DLT state failure"),
+    ):
+        await remember("jenkins_a", fake, "primary")
+    assert await snapshot() == before_failure
+    assert runtime.source_states() == before_state
+
     fake.jobs["api"]["builds"] = [stable, _build(3, cause="Newmarker")]
     del fake.jobs["web"]
     fake.folders = {"": ["api"]}
@@ -178,6 +253,9 @@ async def exercise_memory(runtime):
     assert second["build:api#2"] == first["build:api#2"]
     assert first["build:api#1"] not in second.values()
     assert first["job:web"] not in second.values()
+    assert fake.urls("/3/api/json"), "Retry must fetch the build after failed extraction"
+    assert "Newmarker" in (await runtime.document_contents("jenkins_a"))["build:api#3"]
+    await runtime.search_marker("jenkins_a", "Newmarker")
     for reader in (runtime.vector_texts, runtime.graph_names):
         contents = "\n".join(await reader("jenkins_a")).lower()
         assert "newmarker" in contents and "othermarker" in contents

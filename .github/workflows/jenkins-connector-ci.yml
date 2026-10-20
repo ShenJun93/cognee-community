@@ -32,6 +32,7 @@ jobs:
       UV_NO_CACHE: '1'
       UV_PYTHON_DOWNLOADS: never
       DO_NOT_TRACK: '1'
+      LITELLM_LOCAL_MODEL_COST_MAP: 'true'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -73,7 +74,7 @@ jobs:
         run: .venv/bin/python -m pytest tests/test_jenkins.py -q -ra --junitxml=jenkins-results.xml
       - name: Real Cognee memory acceptance
         if: matrix.python == '3.11'
-        run: .venv/bin/python -m pytest tests/ --run-jenkins-memory -q -ra --junitxml=acceptance-results.xml
+        run: .venv/bin/python -m pytest tests/ --run-jenkins-memory -q -ra -s --junitxml=acceptance-results.xml
       - name: Record test evidence in logs
         if: always()
         run: |
