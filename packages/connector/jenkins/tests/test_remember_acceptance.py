@@ -116,7 +116,12 @@ def _stub_paid_models(monkeypatch):
                 description="Jenkins fixture root",
             )
             edges = [
-                Edge(source=root.id, target=node.id, relationship="contains") for node in nodes
+                Edge(
+                    source_node_id=root.id,
+                    target_node_id=node.id,
+                    relationship_name="contains",
+                )
+                for node in nodes
             ]
             return response_model(nodes=[root, *nodes], edges=edges)
         if isinstance(response_model, type) and issubclass(response_model, SummarizedContent):

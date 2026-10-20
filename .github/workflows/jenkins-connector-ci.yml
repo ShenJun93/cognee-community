@@ -70,6 +70,10 @@ jobs:
         run: |
           .venv/bin/ruff check .
           .venv/bin/ruff format --check .
+      - name: Build wheel and smoke-test example without credentials
+        run: |
+          uv build --wheel
+          env -u JENKINS_URL -u JENKINS_USER -u JENKINS_API_TOKEN .venv/bin/python examples/example.py
       - name: Real Jenkins and DLT regression
         run: .venv/bin/python -m pytest tests/test_jenkins.py -q -ra --junitxml=jenkins-results.xml
       - name: Real Cognee memory acceptance
