@@ -44,8 +44,8 @@ jobs:
           python -m pip install uv
           uv --version
           python --version
-      - name: Resolve dependencies on Ubuntu
-        run: uv lock
+      - name: Verify Ubuntu generated lock
+        run: uv lock --check
       - name: Record generated lock without artifact storage
         if: matrix.python == '3.11'
         run: |
