@@ -5,7 +5,7 @@ description = "Jenkins document connector for Cognee with incremental sync"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
 dependencies = [
-    "cognee==1.6.5",
+    "cognee>=1.6.5,<2",
     "dlt[sqlalchemy]>=1.9.0,<2",
     "requests>=2.31.0,<3",
 ]

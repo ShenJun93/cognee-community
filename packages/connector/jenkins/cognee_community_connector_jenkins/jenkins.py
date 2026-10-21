@@ -1,9 +1,8 @@
 """Incremental Jenkins documents for Cognee's scoped DLT ingestion path.
 
-Build-number requests use pages of at most 100 entries. Missing jobs/builds
-are retained unless confirm_deleted supplies independent authoritative evidence;
-Jenkins visibility and pagination alone do not prove deletion. Credential masking
-is best effort. See README for compatibility and acceptance-test limitations.
+Build-number requests use pages of at most 100 entries. Complete discovery and
+build inventories authorize deletion; incomplete listings fail closed. An optional
+confirm_deleted callback can veto deletion. Credential masking is best effort.
 """
 
 from __future__ import annotations
@@ -141,6 +140,8 @@ def _get_json(session: Any, url: str, tree: str) -> dict:
         if response.status_code == 429:
             raise _RateLimitError("Jenkins HTTP 429")
         response.raise_for_status()
+        if response.status_code != 200:
+            raise RuntimeError("Jenkins JSON listing requires HTTP 200")
         result = response.json()
         if not isinstance(result, dict):
             raise RuntimeError("Jenkins returned invalid JSON")
@@ -196,12 +197,10 @@ def _discover_jobs(
     session: Any,
     base_url: str,
     max_depth: int,
-    known_jobs: Iterable[str] = (),
     check_active: Callable[[], None] | None = None,
 ) -> list[str]:
-    """Discover jobs; refuse incomplete listings for previously populated folders."""
+    """Discover jobs only after every folder has returned a complete HTTP 200 list."""
     found: list[str] = []
-    known_names = set(known_jobs)
 
     def walk(path: str, depth: int, prefix: str = "") -> None:
         if check_active:
@@ -211,12 +210,6 @@ def _discover_jobs(
             raise RuntimeError("Jenkins discovery incomplete: partial listing")
         if not isinstance(data.get("jobs"), list):
             raise RuntimeError("Jenkins job discovery was incomplete: missing jobs list")
-        if (
-            prefix
-            and not data["jobs"]
-            and any(name.startswith(prefix + "/") for name in known_names)
-        ):
-            raise RuntimeError("Jenkins discovered an empty previously populated folder")
         for item in data["jobs"]:
             if not isinstance(item, dict):
                 raise RuntimeError("Jenkins discovery incomplete: malformed record")
@@ -422,7 +415,7 @@ def _sync_jenkins(
     if job_names is not None:
         targets = sorted({name.strip("/") for name in job_names if name.strip("/")})
     else:
-        targets = _discover_jobs(session, base_url, max_folder_depth, known, check_active)
+        targets = _discover_jobs(session, base_url, max_folder_depth, check_active)
 
     current: dict[str, dict] = {}
     emitted = deleted = 0
@@ -443,8 +436,15 @@ def _sync_jenkins(
         prev = known.get(full_name) or {}
         cursor = int(prev.get("last_build") or 0)
         ingested = {int(n) for n in prev.get("builds") or []}
-        existing = _build_numbers(
-            session, base_url, full_name, job, cursor, max_builds_per_job if not prev else 0, active
+        existing, builds_complete = _build_numbers(
+            session,
+            base_url,
+            full_name,
+            job,
+            cursor,
+            max_builds_per_job if not prev else 0,
+            ingested,
+            active,
         )
         stats["scanned"] += 1
 
@@ -457,11 +457,13 @@ def _sync_jenkins(
         else:
             stats["skipped"] += 1
 
-        # Omission (including rotation) is never authority. Consult independent
-        # deletion evidence for retained records outside the current window.
+        # Only an exhausted allBuilds inventory authorizes rotation deletes.
+        # The optional callback adds a veto; it cannot override incomplete data.
         for number in sorted(ingested - set(existing)):
             active()
-            if confirm_deleted and confirm_deleted(full_name, number) is True:
+            if builds_complete and (
+                confirm_deleted is None or confirm_deleted(full_name, number) is True
+            ):
                 yield _deleted_row(build_id(full_name, number))
                 deleted += 1
                 ingested.remove(number)
@@ -522,18 +524,11 @@ def _sync_jenkins(
             "fingerprint": fingerprint,
         }
 
-    if known and not current:
-        logger.warning(
-            "Jenkins: the sweep found 0 jobs but %d were known; skipping deletion this run "
-            "to avoid forgetting everything on a broken listing.",
-            len(known),
-        )
-        logger.info("Jenkins: %d record(s) emitted, 0 deletion(s).", emitted)
-        return
-
     for full_name in sorted(set(known) - set(current)):
         active()
-        if not confirm_deleted or confirm_deleted(full_name, None) is not True:
+        if job_names is not None or (
+            confirm_deleted is not None and confirm_deleted(full_name, None) is not True
+        ):
             current[full_name] = known[full_name]
             continue
         yield _deleted_row(job_id(full_name))
@@ -550,11 +545,12 @@ def _sync_jenkins(
     logger.info("Jenkins: %d record(s) emitted, %d deletion(s).", emitted, deleted)
 
 
-def _build_numbers(session, base_url, full_name, first, cursor, initial_limit, active):
-    """Page newest first; bound each response, stop at the cursor or initial limit.
+def _build_numbers(session, base_url, full_name, first, cursor, initial_limit, retained, active):
+    """Return build numbers and whether the bounded inventory was exhausted.
 
-    Empty/short/capped pages do not establish deletion authority. Metadata may
-    change while paging; duplicate or out-of-order pages abort without state commit.
+    Continue past short pages and the cursor when retained builds are missing.
+    Early stops and missing allBuilds never authorize deletion. Duplicate or
+    out-of-order pages abort without state commit.
     """
     numbers = set()
     data = first
@@ -571,12 +567,12 @@ def _build_numbers(session, base_url, full_name, first, cursor, initial_limit, a
                 if type(last) is not int or last <= 0:
                     raise RuntimeError("Jenkins build listing malformed lastBuild")
                 numbers.add(last)
-            return sorted(numbers)
+            return sorted(numbers), False
         page = data["allBuilds"]
         if not isinstance(page, list) or len(page) > 100:
             raise RuntimeError("Jenkins build listing malformed or unbounded")
         if not page:
-            return sorted(numbers)
+            return sorted(numbers), True
         for item in page:
             number = item.get("number") if isinstance(item, dict) else None
             if (
@@ -587,8 +583,10 @@ def _build_numbers(session, base_url, full_name, first, cursor, initial_limit, a
                 raise RuntimeError("Jenkins build listing malformed or unstable")
             previous = number
             numbers.add(number)
-        if min(numbers) <= cursor or (initial_limit and len(numbers) >= initial_limit):
-            return sorted(numbers)
+        if (min(numbers) <= cursor and retained <= numbers) or (
+            initial_limit and len(numbers) >= initial_limit
+        ):
+            return sorted(numbers), False
         start += len(page)
         active()
         data = _get_json(
@@ -665,10 +663,10 @@ def jenkins_source(
         session: Backward-compatible alias for service; do not pass both.
         check_active: Synchronous callback before requests, retry waits, stream
             chunks, row emission and final state commit. Raise to cancel.
-        confirm_deleted: Independent authoritative deletion evidence callback:
-            (full_name, build_number), or (full_name, None) for a whole job.
-            Return exactly True to delete an omitted record. Never derive this
-            answer from the same possibly filtered listing or a bare HTTP 404.
+        confirm_deleted: Optional extra deletion guard: (full_name, build_number),
+            or (full_name, None) for a whole job. When supplied, return exactly
+            True to allow deletion. Missing/partial listings never authorize
+            deletion, even with this callback. Default: delete on complete lists.
         resource_name: Stable unique DLT table/scope name for each Jenkins source.
             Use different names for different Jenkins installations.
 

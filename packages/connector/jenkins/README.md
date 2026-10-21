@@ -6,17 +6,14 @@ CI history into memory and ask questions like *"why did the nightly build fail l
 
 It exposes a `dlt` resource you hand to `cognee.remember(...)`, reusing cognee's existing DLT
 ingestion path (`resolve_dlt_sources` → `ingest_dlt_source` → `orphan_cleanup`). It provides
-incremental sync and conditional hard deletes. **Omitted records are retained by default**:
-Jenkins permissions and incomplete listings can hide jobs and builds that still exist.
-Deletion requires independent authoritative evidence through `confirm_deleted`.
+incremental sync and automatic scoped hard deletes. Jobs missing from complete discovery,
+and retained builds missing from complete `allBuilds`, are forgotten on the next sync.
+Incomplete listings never authorize deletion. `confirm_deleted` is an optional extra guard.
 
-This source candidate pins **Cognee 1.6.5** and Python **>=3.10,<3.14**. The factory refuses
-cores lacking `DOCUMENT_SYNC_VERSION >= 2` or `PIPELINE_SCOPE_ATTR`, before creating a resource
-or making requests. The checked-in lockfile was generated on Ubuntu against Cognee 1.6.5;
-fresh locked installations and Jenkins/DLT regressions passed on Python 3.10, 3.11 and 3.13.
-The CI workflow also runs real Cognee memory acceptance on Python 3.11 with explicit fixture
-deletion authority. These checks do not establish a production automatic-deletion mechanism;
-that integration contract still needs a maintainer decision.
+Requires **Cognee >=1.6.5,<2** and Python **>=3.10,<3.14**. The factory refuses cores
+lacking `DOCUMENT_SYNC_VERSION >= 2` or `PIPELINE_SCOPE_ATTR` before making requests.
+The checked-in Ubuntu-generated lock selects Cognee 1.6.5. Real memory acceptance uses
+Cognee's document, vector and graph stores with only LLM/embedding calls stubbed.
 
 ## What gets ingested
 
@@ -68,11 +65,11 @@ answer = await cognee.search(
 )
 ```
 
-With a compatible document-mode core, re-running `remember(...)` loads new completed builds.
-The example retains omitted history because it supplies no deletion authority. Reuse a stable
-`resource_name` for each installation; use different names for distinct installations, including
-when they share a dataset. Scoped cleanup and alternating datasets still require end-to-end
-verification on the approved runtime.
+Re-running `remember(...)` loads new completed builds and removes deleted jobs and rotated
+builds after complete listings. Explicit `job_names` selects jobs to read; removing a name
+from that selection retains its history. Only discovery can establish a job deletion.
+Reuse a stable `resource_name` per installation and distinct names for different installations,
+including when sharing a dataset. Cleanup is scoped to the source and dataset.
 
 > **`write_disposition="merge"` is required** — the add pipeline defaults to `"replace"`, which
 > would wipe the synced history on the second sync.
@@ -90,32 +87,34 @@ verification on the approved runtime.
 | `resource_name` | `jenkins_records` | Stable DLT resource/scope name; choose a unique name per Jenkins source. |
 | `service` / `session` | `None` | Requests-compatible client; aliases, pass only one. Caller owns injected clients; connector closes clients it creates. |
 | `check_active` | `None` | Synchronous callback; raise to cancel. Checked before requests, retries, log chunks, rows and final state update. A request already in progress can last until its timeout. |
-| `confirm_deleted` | `None` | `(full_name, build_number_or_None) -> bool`. Return exactly `True` only with independent authoritative deletion evidence. `None` as the second argument identifies a whole job. |
+| `confirm_deleted` | `None` | `(full_name, build_number_or_None) -> bool`. Optional extra guard: when provided, return exactly `True` to allow a complete-list deletion. `None` as the second argument identifies a whole job. |
 
 ## How sync and forget-on-delete work
 
-- **Bounded requests.** Build numbers are requested newest first using `allBuilds[number]{start,end}`
-  in pages of at most 100. An unchanged job needs one build page; an initial sync stops after
-  enough recent builds are found. `max_builds_per_job=0` deliberately scans all history in pages.
-  Large incremental backlogs also require multiple pages. Servers returning more than 100 entries,
-  duplicate or out-of-order build numbers abort the run.
-- **Incremental cursor.** A run pages back to the prior cursor and fetches newer builds. A running
-  build holds the cursor so it can be retried. Offset paging assumes a stable Jenkins listing;
-  concurrent changes detected as duplicate or out-of-order pages abort. Silent server filtering
-  cannot be detected universally. Missing `allBuilds` falls back to `lastBuild`, so intervening
-  history may be unavailable; a present null or malformed list aborts.
-- **Conditional deletion.** A missing job, window omission, rotation or HTTP 404 is insufficient
-  proof of deletion. Without `confirm_deleted`, previously ingested history remains in DLT state
-  and storage. Do not implement the callback by checking this same listing or a bare 404: it must
-  consult a separate trusted deletion feed or a complete administrative snapshot whose visibility
-  and completeness have been established. It is consulted for omitted known jobs/builds only.
-  Removing a job from `job_names` also retains it by default. An entirely empty known-job sweep
-  retains everything even with a callback. Confirmed deletes emit DLT hard-delete rows; deletion
-  of corresponding Cognee documents, graph and vectors remains an acceptance requirement.
-- **Fail closed.** Missing or malformed children, partial-listing signals, a newly empty known
-  folder, a depth cap, or explicit job/build 404 aborts without committing source state. Unknown
-  silent omissions are retained. DLT must complete extraction/load successfully to persist state;
-  rows yielded before a later failure are not evidence of a committed transaction.
+- **Bounded requests.** Build numbers are requested newest first using
+  `allBuilds[number]{start,end}` in pages of at most 100. The initial sync can stop at
+  `max_builds_per_job`; later runs stop early only when every retained build has been seen
+  and the cursor has been reached. Missing retained builds require paging through the
+  terminal empty page before rotation deletes are allowed. Short pages alone are never
+  treated as terminal. Duplicate, out-of-order or oversized pages abort the run.
+- **Incremental cursor.** Only completed builds above the cursor are fetched. A running
+  build holds the cursor so it is retried. Missing `allBuilds` on the initial page falls
+  back to `lastBuild` for ingestion and never authorizes build deletion; missing later
+  pages, null/malformed lists and explicit partial signals abort without committing state.
+- **Automatic deletion.** Discovery must return HTTP 200 for the root and every folder,
+  without missing/malformed children, partial signals or a `max_folder_depth` cut. A missing
+  job then emits a tombstone for itself and all its retained builds. A complete empty
+  root or folder is valid, including deletion of the last job. Builds are deleted only
+  after a complete `allBuilds` inventory. An optional `confirm_deleted(name, number)`
+  callback can veto these deletes; it cannot authorize deletion from incomplete data.
+  For a job deletion the callback receives `None` instead of a build number and guards
+  the job and all its builds together. Cognee consumes the DLT tombstones through scoped
+  document sync and removes corresponding documents, vectors and graph data.
+- **Fail closed.** Non-200 responses, explicit job/build 404, partial discovery and depth
+  cuts abort extraction. DLT persists source state only after a successful load. A configured
+  job returning 404 keeps its old history. Jenkins can silently filter readable objects;
+  HTTP 200 cannot universally detect such permission changes. Use a stable read scope and
+  supply `confirm_deleted` when a stricter deletion policy is required.
 - **HTTP behavior.** Retry only GET on transient responses, at most four retries. Numeric and HTTP
   date `Retry-After` values are capped at 30 seconds per wait, including cloned retry objects.
   Public HTTP failures omit request URLs and headers; raw exception chains are suppressed.
@@ -147,7 +146,7 @@ uv run --with pytest pytest tests/
 
 The source tests use fake Jenkins and include real DLT SQLite merge and rollback regressions,
 bounded 10,000-build history, malformed/capped listing, masking, cancellation and retries.
-All 59 Jenkins/DLT cases passed on GitHub-hosted Ubuntu with Python 3.10, 3.11 and 3.13.
+The fork CI matrix runs Python 3.10, 3.11 and 3.13, with real memory acceptance on 3.11.
 They have **not run on the development Windows host**: enforced WDAC blocks its Cognee native
 stack. Do not reroute around that policy. Windows checks remain static only.
 
@@ -177,5 +176,5 @@ extraction fails and checks the persisted cursor, unchanged rows and successful 
 regression passed on all three Ubuntu Python versions. Follow the isolated
 [CI workflow](https://github.com/ShenJun93/cognee-community/actions/workflows/jenkins-connector-ci.yml)
 for the current memory acceptance result. A skip is not memory evidence, and passing fixture
-deletion does not establish a production authoritative deletion mechanism. No test or example
+deletion alone does not validate all incomplete-listing and isolation cases. No test or example
 calls global prune.

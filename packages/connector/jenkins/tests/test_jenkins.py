@@ -11,8 +11,8 @@ so these run in CI. Coverage:
   - a running build is skipped and holds the cursor until it completes
   - console logs are fetched only for failing builds, tail-truncated and redacted
   - parameter default values are never ingested
-  - omitted records require independent confirmation before emitting hard deletes
-  - an empty sweep does not mass-delete
+  - complete inventories automatically emit scoped hard deletes
+  - a complete empty sweep deletes the last job
   - folders are discovered recursively, bounded by max_folder_depth
   - the dlt resource is wired with merge + id PK + the hard_delete column
   - a real dlt merge removes the marked rows (end-to-end forget-on-delete)
@@ -359,7 +359,7 @@ def test_discarded_builds_become_hard_delete_markers():
     list(sync_jenkins(fake, BASE_URL, state))
     fake.jobs["api"]["builds"] = [_build(2), _build(3)]  # build 1 rotated out
 
-    rows = list(sync_jenkins(fake, BASE_URL, state, confirm_deleted=lambda name, n: n == 1))
+    rows = list(sync_jenkins(fake, BASE_URL, state))
 
     assert _deleted(rows) == [build_id("api", 1)]
     assert state["jobs"]["api"]["builds"] == [2, 3]
@@ -372,7 +372,7 @@ def test_deleted_job_forgets_the_job_and_all_its_builds():
     del fake.jobs["web"]
     fake.folders = {"": ["api"]}
 
-    rows = list(sync_jenkins(fake, BASE_URL, state, confirm_deleted=lambda name, n: name == "web"))
+    rows = list(sync_jenkins(fake, BASE_URL, state))
 
     assert _deleted(rows) == [build_id("web", 1), job_id("web")]
     assert set(state["jobs"]) == {"api"}
@@ -408,18 +408,17 @@ def test_absent_allbuilds_does_not_delete_known_builds():
     assert state["jobs"]["api"]["builds"] == [2, 3]
 
 
-def test_empty_previously_populated_subfolder_aborts_without_deleting_history():
+def test_complete_empty_subfolder_deletes_its_previous_jobs():
     fake = FakeJenkins(
         {"team/api": {"builds": [_build(1)]}, "other": {"builds": [_build(1)]}},
         {"": ["team", "other"], "team": ["api"]},
     )
     state = {}
     list(sync_jenkins(fake, BASE_URL, state))
-    before = {k: dict(v) for k, v in state["jobs"].items()}
     fake.folders["team"] = []
-    with pytest.raises(RuntimeError, match="empty previously populated folder"):
-        list(sync_jenkins(fake, BASE_URL, state))
-    assert state["jobs"] == before
+    rows = list(sync_jenkins(fake, BASE_URL, state))
+    assert _deleted(rows) == [build_id("team/api", 1), job_id("team/api")]
+    assert set(state["jobs"]) == {"other"}
 
 
 def test_missing_folder_listing_aborts_before_any_mass_delete():
@@ -440,17 +439,16 @@ def test_missing_folder_listing_aborts_before_any_mass_delete():
     assert state["jobs"] == before
 
 
-def test_empty_sweep_does_not_mass_delete_and_preserves_state():
+def test_complete_empty_sweep_deletes_last_job():
     fake = FakeJenkins({"api": {"builds": [_build(1)]}})
     state = {}
     list(sync_jenkins(fake, BASE_URL, state))
-    before = dict(state["jobs"])
     fake.folders = {"": []}
 
     rows = list(sync_jenkins(fake, BASE_URL, state))
 
-    assert rows == []
-    assert state["jobs"] == before
+    assert _deleted(rows) == [build_id("api", 1), job_id("api")]
+    assert state["jobs"] == {}
 
 
 def test_transient_error_aborts_without_touching_state():
@@ -548,7 +546,6 @@ def test_incremental_and_forget_on_delete_end_to_end_through_a_real_dlt_merge(tm
         jenkins_source(
             base_url=BASE_URL,
             session=fake,
-            confirm_deleted=lambda name, n: name == "web" or (name == "api" and n == 1),
         )
     )
     assert _read_ids(pipeline) == [
@@ -568,7 +565,6 @@ def test_incremental_and_forget_on_delete_end_to_end_through_a_real_dlt_merge(tm
         jenkins_source(
             base_url=BASE_URL,
             session=fake,
-            confirm_deleted=lambda name, n: name == "web" or (name == "api" and n == 1),
         )
     )
 
@@ -622,8 +618,8 @@ def test_ten_thousand_builds_use_bounded_pages_and_incremental_stop():
     fake.jobs["api"]["builds"] = [_build(n) for n in range(9990, 10002)]
     rows = list(sync_jenkins(fake, BASE_URL, state))
     assert _ids(rows) == ["build:api#10001"]
-    assert _deleted(rows) == []  # rotation alone is not deletion authority
-    assert 9981 in state["jobs"]["api"]["builds"]
+    assert _deleted(rows) == [build_id("api", n) for n in range(9981, 9990)]
+    assert state["jobs"]["api"]["builds"] == list(range(9990, 10002))
 
 
 def test_paging_catches_more_than_one_page_of_new_builds():
@@ -636,12 +632,12 @@ def test_paging_catches_more_than_one_page_of_new_builds():
     assert state["jobs"]["api"]["last_build"] == 251
 
 
-def test_partial_job_omission_preserves_history_without_authority():
+def test_optional_guard_retains_job_omitted_from_complete_discovery():
     fake = FakeJenkins({"api": {"builds": [_build(1)]}, "web": {"builds": [_build(1)]}})
     state = {}
     list(sync_jenkins(fake, BASE_URL, state))
     fake.folders = {"": ["api"]}
-    rows = list(sync_jenkins(fake, BASE_URL, state))
+    rows = list(sync_jenkins(fake, BASE_URL, state, confirm_deleted=lambda *_: False))
     assert _deleted(rows) == []
     assert set(state["jobs"]) == {"api", "web"}
 

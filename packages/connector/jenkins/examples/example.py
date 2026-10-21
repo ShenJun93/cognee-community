@@ -6,9 +6,9 @@ forget-on-delete, then ask why builds failed.
 ``jenkins_source`` returns a ``dlt`` resource that you hand straight to
 ``cognee.remember``. The first run ingests each job and its most recent builds
 (with the tail of every failed build's console log); re-running ``remember``
-fetches builds that finished since. Omitted records are retained unless an
-independent authority confirms deletion. Cognee 1.6.5 is required. Ubuntu CI
-tests the memory path with fixture authority; this demo retains omissions.
+fetches builds that finished since. Complete listings automatically remove
+deleted jobs and rotated builds. Incomplete listings never authorize deletion.
+Cognee >=1.6.5,<2 is required; confirm_deleted is an optional extra guard.
 
 ────────────────────────────────────────────────────────────────────────────
 One-time setup
@@ -93,7 +93,7 @@ async def main():
     )
     print("Failures:", answer)
 
-    # ── Second sync: new builds; ambiguous omissions are retained ────────
+    # ── Second sync: new builds and complete-list deletion ────────
     print("\n=== Jenkins sync #2 (incremental) ===")
     print(
         await cognee.remember(build_source(), dataset_name=DATASET_NAME, **JENKINS_REMEMBER_KWARGS)

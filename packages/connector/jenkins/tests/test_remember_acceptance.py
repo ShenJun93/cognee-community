@@ -1,4 +1,4 @@
-"""Real memory acceptance candidate, deliberately blocked pending isolation proof.
+"""Real memory acceptance in an isolated disposable process.
 
 The opt-in selects execution only; it cannot bypass the worker's database path,
 provider, fresh-process and network checks. Windows stays skipped under WDAC.
@@ -176,15 +176,12 @@ async def exercise_memory(runtime):
     )
     other = FakeJenkins({"other": {"description": "Othermarker", "builds": []}})
 
-    async def remember(dataset, client, scope, deleted=False, **source_kwargs):
+    async def remember(dataset, client, scope, **source_kwargs):
         result = await cognee.remember(
             jenkins_source(
                 base_url=BASE_URL,
                 service=client,
                 resource_name=scope,
-                confirm_deleted=lambda name, number: (
-                    deleted and (name == "web" or (name == "api" and number == 1))
-                ),
                 **source_kwargs,
             ),
             dataset_name=dataset,
@@ -242,10 +239,12 @@ async def exercise_memory(runtime):
                 return _Resp(status=403)
             if self.mode == "partial" and url == BASE_URL + "/api/json":
                 response._payload = {"jobs": None}
+            if self.mode == "build_partial" and url.endswith("/job/api/api/json"):
+                response._payload["partial"] = True
             return response
 
     broken = Broken(fake.jobs)
-    for mode in ("access", "partial"):
+    for mode in ("access", "partial", "build_partial"):
         broken.mode = mode
         with pytest.raises(Exception, match=r"Jenkins|discovery"):
             await remember("jenkins_a", broken, "primary")
@@ -275,7 +274,7 @@ async def exercise_memory(runtime):
     fake.jobs["api"]["builds"] = [stable, _build(3, cause="Newmarker")]
     del fake.jobs["web"]
     fake.folders = {"": ["api"]}
-    await remember("jenkins_a", fake, "primary", deleted=True)
+    await remember("jenkins_a", fake, "primary")
     second = await runtime.documents("jenkins_a")
     assert set(second) == {"job:api", "build:api#2", "build:api#3", "job:other"}
     assert second["job:api"] == first["job:api"]
@@ -296,7 +295,7 @@ async def exercise_memory(runtime):
         assert "newmarker" not in contents and "othermarker" not in contents
     # Revisit both scopes: state/cursor collisions must not reintroduce old rows.
     await remember("jenkins_a", other, "secondary")
-    await remember("jenkins_b", fake, "primary", deleted=True)
+    await remember("jenkins_b", fake, "primary")
     assert await runtime.documents("jenkins_a") == second
     third = await runtime.documents("jenkins_b")
     assert set(third) == {"job:api", "build:api#2", "build:api#3"}
@@ -321,7 +320,7 @@ async def exercise_memory(runtime):
     del collision_primary.jobs["web"]
     collision_primary.folders = {"": ["api"]}
     collision_primary.jobs["api"]["builds"] = [stable, _build(3, cause="Newmarker")]
-    await remember("jenkins_collision", collision_primary, "collision_primary", deleted=True)
+    await remember("jenkins_collision", collision_primary, "collision_primary")
     assert await runtime.documents("jenkins_collision", "collision_secondary") == secondary_ids
     remaining = await runtime.documents("jenkins_collision", "collision_primary")
     assert set(remaining) == {"job:api", "build:api#2", "build:api#3"}
@@ -329,3 +328,16 @@ async def exercise_memory(runtime):
         contents = "\n".join(await reader("jenkins_collision")).lower()
         assert "othermarker" in contents and "newmarker" in contents
         assert "rotatedmarker" not in contents and "deletedmarker" not in contents
+
+    # A complete empty inventory removes the final job/builds in this scope,
+    # while an overlapping source and another dataset retain their own memory.
+    collision_primary.folders = {"": []}
+    await remember("jenkins_collision", collision_primary, "collision_primary")
+    assert await runtime.documents("jenkins_collision", "collision_primary") == {}
+    assert await runtime.documents("jenkins_collision", "collision_secondary") == secondary_ids
+    assert await runtime.documents("jenkins_a") == second
+    assert await runtime.documents("jenkins_b") == third
+    for reader in (runtime.vector_texts, runtime.graph_names):
+        contents = "\n".join(await reader("jenkins_collision")).lower()
+        assert "othermarker" in contents
+        assert "newmarker" not in contents and "stablemarker" not in contents

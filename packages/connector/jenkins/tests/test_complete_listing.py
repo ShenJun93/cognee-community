@@ -29,7 +29,13 @@ def test_complete_empty_listing_deletes_last_job():
     fake, state = seeded()
     fake.folders = {"": []}
     rows = list(sync_jenkins(fake, BASE_URL, state))
-    assert set(_deleted(rows)) == {"job:api", "build:api#1", "build:api#2", "job:web", "build:web#1"}
+    assert set(_deleted(rows)) == {
+        "job:api",
+        "build:api#1",
+        "build:api#2",
+        "job:web",
+        "build:web#1",
+    }
     assert state == {"jobs": {}}
 
 
@@ -90,7 +96,11 @@ def test_incomplete_discovery_never_deletes_even_with_callback(mode):
 
     client = Broken(fake.jobs, {"": ["team"], "team": []} if mode == "depth" else {"": []})
     with pytest.raises(RuntimeError):
-        list(sync_jenkins(client, BASE_URL, state, max_folder_depth=0, confirm_deleted=lambda *_: True))
+        list(
+            sync_jenkins(
+                client, BASE_URL, state, max_folder_depth=0, confirm_deleted=lambda *_: True
+            )
+        )
     assert state == before
 
 
@@ -114,10 +124,12 @@ def test_incomplete_build_inventory_never_deletes(mode):
 
     client = Broken({"api": {"builds": [_build(2)]}, "web": fake.jobs["web"]})
     if mode == "missing":
-        assert _deleted(list(sync_jenkins(client, BASE_URL, state, confirm_deleted=lambda *_: True))) == []
+        assert (
+            _deleted(list(sync_jenkins(client, BASE_URL, state, confirm_deleted=lambda *_: True)))
+            == []
+        )
         assert state["jobs"]["api"]["builds"] == [1, 2]
     else:
         with pytest.raises(RuntimeError):
             list(sync_jenkins(client, BASE_URL, state, confirm_deleted=lambda *_: True))
         assert state == before
-
