@@ -77,7 +77,9 @@ def sandbox_environment(root):
             "EMBEDDING_DIMENSIONS": "256",
             "EMBEDDING_API_KEY": "fixture-unused-model-key",
             "KUZU_BUFFER_POOL_SIZE": str(64 * 1024 * 1024),
-            "KUZU_MAX_DB_SIZE": str(256 * 1024 * 1024),
+            # Schema/cleanup operations in the multi-source scenario need more
+            # address space; the actual buffer pool stays capped at 64 MiB.
+            "KUZU_MAX_DB_SIZE": str(1024 * 1024 * 1024),
             "KUZU_NUM_THREADS": "1",
         }
     )
