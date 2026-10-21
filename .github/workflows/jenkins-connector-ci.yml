@@ -68,6 +68,8 @@ jobs:
           uv sync --locked --python '${{ matrix.python }}'
           uv pip install --python .venv/bin/python pytest pytest-asyncio ruff
           uv pip freeze --python .venv/bin/python
+      - name: Complete listing deletion contract
+        run: .venv/bin/python -m pytest tests/test_complete_listing.py -q -ra
       - name: Lint and format
         run: |
           .venv/bin/ruff check .
@@ -92,3 +94,4 @@ jobs:
                   print(name)
                   print(path.read_text())
           PY
+
